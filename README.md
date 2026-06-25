@@ -1,5 +1,6 @@
 ## Demo
 <img width="640" height="360" alt="tron1_demo" src="https://github.com/user-attachments/assets/95915e2f-10b7-438d-95bf-194f1bb63d25" />
+<img width="640" height="360" alt="tron1_demo" src="https://github.com/user-attachments/assets/54fb66b3-bc9c-4270-91a7-79b819eb5da3" />
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)
