@@ -1,3 +1,6 @@
+## Demo
+![Uploading tron1_demo.gif…]()
+
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)
     - `conda create -n your_virtual_env python=3.8`
