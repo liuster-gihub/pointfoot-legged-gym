@@ -289,6 +289,8 @@ class PPO:
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
+            with torch.no_grad():
+                self.actor_critic.logstd.clamp_(min=-3.0, max=0.5)
 
             num_updates += 1
             mean_value_loss += value_loss.item()

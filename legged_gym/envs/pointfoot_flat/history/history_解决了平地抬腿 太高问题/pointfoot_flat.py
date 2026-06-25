@@ -251,11 +251,9 @@ class BipedPF(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
         self.last_base_position[env_ids] = self.base_position[env_ids]
-        self.last_root_vel[env_ids] = self.root_states[env_ids, 7:13]
         self.last_foot_positions[env_ids] = self.foot_positions[env_ids]
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
-        self.last_contacts[env_ids] = False
         self.episode_length_buf[env_ids] = 0
         self.envs_steps_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -330,13 +328,6 @@ class BipedPF(BaseTask):
         # Penalize xy axes base angular velocity
         return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
 
-    def _reward_base_ang_acc(self):
-        """Penalize rapid changes of body angular velocity to reduce torso shake."""
-        world_ang_vel = self.root_states[:, 10:13]
-        last_world_ang_vel = self.last_root_vel[:, 3:6]
-        body_ang_acc = (world_ang_vel - last_world_ang_vel) / self.dt
-        return torch.sum(torch.square(body_ang_acc), dim=1)
-
     def _reward_orientation(self):
         # Penalize non flat base orientation
         reward = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
@@ -364,22 +355,6 @@ class BipedPF(BaseTask):
         return torch.sum(
             torch.square(
                 self.actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1)
-
-    def _reward_action_transition_smooth(self):
-        """Apply extra second-order smoothing around contact-phase transitions."""
-        action_curvature = torch.square(
-            self.actions
-            - 2 * self.last_actions[:, :, 0]
-            + self.last_actions[:, :, 1]
-        )
-        # desired_contact_states is smoothed from 0 to 1. The gate peaks at
-        # 0.5, i.e. around lift-off and touchdown, and vanishes away from them.
-        transition_gate = 4.0 * self.desired_contact_states * (
-            1.0 - self.desired_contact_states
-        )
-        joints_per_leg = self.num_actions // len(self.feet_indices)
-        transition_gate = transition_gate.repeat_interleave(joints_per_leg, dim=1)
-        return torch.sum(transition_gate * action_curvature, dim=1)
 
     def _reward_keep_balance(self):
         return torch.ones(
@@ -420,13 +395,7 @@ class BipedPF(BaseTask):
 
     def _reward_heading_error(self):
         _, heading_error = self._get_path_errors()
-        # A small deadband prevents alternating corrections for negligible
-        # heading errors, which otherwise tends to create yaw hunting.
-        effective_error = torch.clamp(
-            torch.abs(heading_error) - self.cfg.rewards.heading_error_deadband,
-            min=0.0,
-        )
-        return torch.square(effective_error)
+        return torch.square(heading_error)
 
     def _reward_swing_foot_clearance(self):
         swing_progress, in_swing = self._get_swing_progress()
@@ -591,54 +560,3 @@ class BipedPF(BaseTask):
         landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
         reward = torch.sum(torch.square(landing_z_vels), dim=1)
         return reward
-
-    def _reward_foot_contact_force(self):
-        """Penalize sustained vertical foot loads above a body-weight ratio."""
-        vertical_force = torch.clamp(
-            self.contact_forces[:, self.feet_indices, 2], min=0.0
-        )
-        body_weight = (
-            self.cfg.rewards.nominal_robot_mass
-            * self.cfg.rewards.gravity_magnitude
-        )
-        force_ratio = vertical_force / body_weight
-        overload = torch.clamp(
-            force_ratio - self.cfg.rewards.contact_force_soft_limit_ratio,
-            min=0.0,
-        )
-        return torch.sum(torch.square(overload), dim=1)
-
-    def _reward_foot_touchdown_impulse(self):
-        """Penalize normalized contact impulse only on a new touchdown."""
-        vertical_force = torch.clamp(
-            self.contact_forces[:, self.feet_indices, 2], min=0.0
-        )
-        contacts = vertical_force > 0.1
-        touchdown = contacts & (~self.last_contacts)
-        body_weight = (
-            self.cfg.rewards.nominal_robot_mass
-            * self.cfg.rewards.gravity_magnitude
-        )
-        normalized_impulse = (
-            vertical_force * self.dt
-            / (
-                body_weight
-                * self.cfg.rewards.touchdown_impulse_window_s
-                + 1e-6
-            )
-        )
-        excess_impulse = torch.clamp(
-            normalized_impulse
-            - self.cfg.rewards.touchdown_impulse_soft_limit_ratio,
-            min=0.0,
-        )
-        return torch.sum(
-            touchdown.float() * torch.square(excess_impulse), dim=1
-        )
-
-    def compute_reward(self):
-        """Compute rewards, then preserve contacts for next-step touchdown detection."""
-        super().compute_reward()
-        self.last_contacts[:] = (
-            self.contact_forces[:, self.feet_indices, 2] > 0.1
-        )

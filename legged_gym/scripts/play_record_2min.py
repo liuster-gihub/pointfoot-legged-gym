@@ -52,8 +52,8 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     robot_type = os.getenv("ROBOT_TYPE")
     # override some parameters for testing
-    env_cfg.env.episode_length_s = 30
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.episode_length_s = 120  # record about 2 minutes
+    env_cfg.env.num_envs = 1  # record only one robot
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -104,7 +104,7 @@ def play(args):
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     commands_val = to_torch([0.5, 0.0, 0, 0], device=env.device) if robot_type.startswith("PF")\
-        else to_torch([0.4, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([0.5, 0.0, 0.0, 0.75, 0.0])
+        else to_torch([1.0, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([0.5, 0.0, 0.0, 0.75, 0.0])
     action_scale = env.cfg.control.action_scale_pos if robot_type == "WF_TRON1A"\
         else env.cfg.control.action_scale
     obs, obs_history, commands, _ = env.get_observations()
@@ -146,9 +146,9 @@ def play(args):
         )
 
     logger = Logger(env.dt)
-    robot_index = min(5, env.num_envs - 1)  # which robot is used for logging
+    robot_index = 0  # record/log the only robot
     joint_index = 1  # which joint is used for logging
-    stop_state_log = 100  # number of steps before plotting states
+    stop_state_log = 10**9  # disable plotting during video recording
     stop_rew_log = (
         env.max_episode_length + 1
     )  # number of steps before print average episode rewards
@@ -157,7 +157,19 @@ def play(args):
     # camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
     img_idx = 0
     est = None
-    for i in range(10 * int(env.max_episode_length)):
+    frames_dir = os.path.join(
+        LEGGED_GYM_ROOT_DIR,
+        "logs",
+        args.task,
+        train_cfg.runner.experiment_name,
+        args.load_run if args.load_run is not None else "play_record",
+        "exported",
+        "frames",
+    )
+    os.makedirs(frames_dir, exist_ok=True)
+    print(f"Saving frames to: {frames_dir}")
+
+    for i in range(int(env.max_episode_length)):
         est = encoder(obs_history)
         actions = policy(torch.cat((est, obs, commands), dim=-1).detach())
 
@@ -168,14 +180,7 @@ def play(args):
         )
         if RECORD_FRAMES:
             if i % 2:
-                filename = os.path.join(
-                    LEGGED_GYM_ROOT_DIR,
-                    "logs",
-                    train_cfg.runner.experiment_name,
-                    "exported",
-                    "frames",
-                    f"{img_idx}.png",
-                )
+                filename = os.path.join(frames_dir, f"{img_idx:06d}.png")
                 env.gym.write_viewer_image_to_file(env.viewer, filename)
                 img_idx += 1
         if MOVE_CAMERA:
@@ -185,7 +190,7 @@ def play(args):
             )
             target_position[2] = 0
             camera_position = target_position + camera_offset
-            # env.set_camera(camera_position, target_position)
+            env.set_camera(camera_position, target_position)
 
         if i < stop_state_log:
             logger.log_states(
@@ -237,8 +242,8 @@ def play(args):
 
 
 if __name__ == "__main__":
-    EXPORT_POLICY = True
-    RECORD_FRAMES = False
+    EXPORT_POLICY = False
+    RECORD_FRAMES = True
     MOVE_CAMERA = True
     args = get_args()
     play(args)

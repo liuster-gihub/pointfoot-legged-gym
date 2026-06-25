@@ -148,18 +148,6 @@ class BipedSF(BaseTask):
         """Computes observations"""
         self.obs_buf, self.critic_obs_buf = self.compute_self_observations()
 
-        # add perceptive inputs if not blind
-        if self.cfg.terrain.measure_heights:
-            heights = (
-                torch.clip(
-                    self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
-                    -1,
-                    1.0,
-                )
-                * self.obs_scales.height_measurements
-            )
-            self.obs_buf = torch.cat((self.obs_buf, heights), dim=-1)
-
         # add noise if needed
         if self.add_noise:
             self.obs_buf += (
@@ -227,7 +215,13 @@ class BipedSF(BaseTask):
         noise_vec[14:22] = (
             noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         )
-        noise_vec[22:] = 0.0  # previous actions
+        noise_vec[22:36] = 0.0  # previous actions, clock, and gait
+        if self.cfg.terrain.measure_heights:
+            noise_vec[36:] = (
+                noise_scales.height_measurements
+                * noise_level
+                * self.obs_scales.height_measurements
+            )
         return noise_vec
 
     def _create_envs(self):
@@ -425,6 +419,8 @@ class BipedSF(BaseTask):
         self.envs_steps_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.obs_history[env_ids] = 0
+        if self.cfg.terrain.measure_heights or self.cfg.terrain.critic_measure_heights:
+            self.measured_heights = self._get_heights()
         obs_buf, _ = self.compute_self_observations()
         self.obs_history[env_ids] = obs_buf[env_ids].repeat(1, self.obs_history_length)
         self.gait_indices[env_ids] = 0
@@ -438,6 +434,13 @@ class BipedSF(BaseTask):
                     torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             )
             self.episode_sums[key][env_ids] = 0.0
+        if self.cfg.terrain.curriculum:
+            self.extras["episode"]["terrain_level_mean"] = torch.mean(
+                self.terrain_levels.float()
+            )
+            self.extras["episode"]["terrain_level_max"] = torch.max(
+                self.terrain_levels.float()
+            )
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf | self.edge_reset_buf
@@ -450,20 +453,8 @@ class BipedSF(BaseTask):
         Args:
             env_ids (List[int]): Environemnt ids
         """
-        n = env_ids.size(0)
-        indices = torch.randperm(n)
-
-        half_size = n // 2
-        half_indices = indices[:half_size]
-        remaining_indices = indices[half_size:]
-
-        half_list = env_ids[half_indices]
-        remaining_list = env_ids[remaining_indices]
-        self.dof_pos[half_list] = self.default_dof_pos[half_list, :] + torch_rand_float(
-            -0.5, 0.5, (len(half_list), self.num_dof), device=self.device
-        )
-        self.dof_pos[remaining_list] = self.init_stand_dof_pos[remaining_list, :] + torch_rand_float(
-            -0.5, 0.5, (len(remaining_list), self.num_dof), device=self.device
+        self.dof_pos[env_ids] = self.init_stand_dof_pos[env_ids, :] + torch_rand_float(
+            -0.05, 0.05, (len(env_ids), self.num_dof), device=self.device
         )
         self.dof_vel[env_ids] = 0.0
 
@@ -538,9 +529,19 @@ class BipedSF(BaseTask):
             ),
             dim=-1,
         )
+        if self.cfg.terrain.measure_heights:
+            heights = (
+                torch.clip(
+                    self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
+                    -1,
+                    1,
+                )
+                * self.obs_scales.height_measurements
+            )
+            obs_buf = torch.cat((obs_buf, heights), dim=-1)
         # compute critic_obs_buf
         critic_obs_buf = torch.cat((
-            self.base_lin_vel * self.obs_scales.lin_vel, self.obs_buf), dim=-1)
+            self.base_lin_vel * self.obs_scales.lin_vel, obs_buf), dim=-1)
         return obs_buf, critic_obs_buf
 
     def get_observations(self):
@@ -1062,6 +1063,40 @@ class BipedSF(BaseTask):
         # Tracking of angular velocity commands (yaw)
         ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error / self.cfg.rewards.ang_tracking_sigma)
+
+    def _reward_stair_progress(self):
+        forward_speed = (self.base_position[:, 0] - self.last_base_position[:, 0]) / self.dt
+        return torch.clip(forward_speed, 0.0, self.cfg.commands.ranges.lin_vel_x[1])
+
+    def _reward_lateral_motion(self):
+        return torch.square(self.base_lin_vel[:, 1])
+
+    def _reward_yaw_motion(self):
+        return torch.square(self.base_ang_vel[:, 2])
+
+    def _reward_swing_foot_clearance(self):
+        swing_mask = 1.0 - self.desired_contact_states
+        target_height = self.cfg.rewards.feet_height_target
+        clearance = torch.exp(
+            -torch.square(self.foot_heights - target_height)
+            / self.cfg.rewards.feet_clearance_sigma
+        )
+        return torch.sum(swing_mask * clearance, dim=1) / (
+            torch.sum(swing_mask, dim=1) + 1e-6
+        )
+
+    def _reward_swing_foot_forward(self):
+        swing_mask = 1.0 - self.desired_contact_states
+        target_height = self.cfg.rewards.feet_height_target
+        height_gate = torch.clip(self.foot_heights / target_height, 0.0, 1.0)
+        forward_vel = torch.clip(
+            self.foot_relative_velocities[:, :, 0],
+            0.0,
+            self.cfg.rewards.swing_forward_vel_target,
+        )
+        return torch.sum(swing_mask * height_gate * forward_vel, dim=1) / (
+            torch.sum(swing_mask, dim=1) + 1e-6
+        )
 
     def _reward_stand_still(self):
 

@@ -251,11 +251,9 @@ class BipedPF(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
         self.last_base_position[env_ids] = self.base_position[env_ids]
-        self.last_root_vel[env_ids] = self.root_states[env_ids, 7:13]
         self.last_foot_positions[env_ids] = self.foot_positions[env_ids]
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
-        self.last_contacts[env_ids] = False
         self.episode_length_buf[env_ids] = 0
         self.envs_steps_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -292,7 +290,6 @@ class BipedPF(BaseTask):
     def compute_group_observations(self):
         # note that observation noise need to modified accordingly !!!
         lateral_error, heading_error = self._get_path_errors()
-        adaptive_clearance = self._get_adaptive_clearance_peaks()
         obs_buf = torch.cat(
             (
                 self.base_ang_vel * self.obs_scales.ang_vel,
@@ -306,7 +303,6 @@ class BipedPF(BaseTask):
                 lateral_error.unsqueeze(1),
                 torch.sin(heading_error).unsqueeze(1),
                 torch.cos(heading_error).unsqueeze(1),
-                adaptive_clearance / self.cfg.rewards.feet_height_target,
             ),
             dim=-1,
         )
@@ -329,13 +325,6 @@ class BipedPF(BaseTask):
     def _reward_ang_vel_xy(self):
         # Penalize xy axes base angular velocity
         return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
-
-    def _reward_base_ang_acc(self):
-        """Penalize rapid changes of body angular velocity to reduce torso shake."""
-        world_ang_vel = self.root_states[:, 10:13]
-        last_world_ang_vel = self.last_root_vel[:, 3:6]
-        body_ang_acc = (world_ang_vel - last_world_ang_vel) / self.dt
-        return torch.sum(torch.square(body_ang_acc), dim=1)
 
     def _reward_orientation(self):
         # Penalize non flat base orientation
@@ -364,22 +353,6 @@ class BipedPF(BaseTask):
         return torch.sum(
             torch.square(
                 self.actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1)
-
-    def _reward_action_transition_smooth(self):
-        """Apply extra second-order smoothing around contact-phase transitions."""
-        action_curvature = torch.square(
-            self.actions
-            - 2 * self.last_actions[:, :, 0]
-            + self.last_actions[:, :, 1]
-        )
-        # desired_contact_states is smoothed from 0 to 1. The gate peaks at
-        # 0.5, i.e. around lift-off and touchdown, and vanishes away from them.
-        transition_gate = 4.0 * self.desired_contact_states * (
-            1.0 - self.desired_contact_states
-        )
-        joints_per_leg = self.num_actions // len(self.feet_indices)
-        transition_gate = transition_gate.repeat_interleave(joints_per_leg, dim=1)
-        return torch.sum(transition_gate * action_curvature, dim=1)
 
     def _reward_keep_balance(self):
         return torch.ones(
@@ -420,23 +393,11 @@ class BipedPF(BaseTask):
 
     def _reward_heading_error(self):
         _, heading_error = self._get_path_errors()
-        # A small deadband prevents alternating corrections for negligible
-        # heading errors, which otherwise tends to create yaw hunting.
-        effective_error = torch.clamp(
-            torch.abs(heading_error) - self.cfg.rewards.heading_error_deadband,
-            min=0.0,
-        )
-        return torch.square(effective_error)
+        return torch.square(heading_error)
 
     def _reward_swing_foot_clearance(self):
-        swing_progress, in_swing = self._get_swing_progress()
-        swing_mask = (1.0 - self.desired_contact_states) * in_swing.float()
-        peak_height = self._get_adaptive_clearance_peaks()
-        phase_profile = torch.sin(torch.pi * swing_progress).clamp(min=0.0)
-        phase_profile = torch.pow(
-            phase_profile, self.cfg.rewards.feet_height_phase_power
-        )
-        target_height = peak_height * phase_profile
+        swing_mask = 1.0 - self.desired_contact_states
+        target_height = self.cfg.rewards.feet_height_target
         clearance = torch.exp(
             -torch.square(self.foot_heights - target_height)
             / self.cfg.rewards.feet_clearance_sigma
@@ -445,88 +406,10 @@ class BipedPF(BaseTask):
             torch.sum(swing_mask, dim=1) + 1e-6
         )
 
-    def _get_swing_progress(self):
-        """Return normalized [0, 1] swing progress and a per-foot swing mask."""
-        offsets = self.gaits[:, 1]
-        foot_phase = torch.remainder(
-            torch.stack(
-                (self.gait_indices, self.gait_indices + offsets), dim=1
-            ),
-            1.0,
-        )
-        stance_duration = self.gaits[:, 2].unsqueeze(1).expand_as(foot_phase)
-        in_swing = foot_phase >= stance_duration
-        swing_progress = torch.clamp(
-            (foot_phase - stance_duration) / (1.0 - stance_duration + 1e-6),
-            0.0,
-            1.0,
-        )
-        return swing_progress, in_swing
-
-    def _sample_terrain_heights_xy(self, points_xy):
-        """Sample conservative terrain heights at world-frame XY points."""
-        if self.cfg.terrain.mesh_type == "plane":
-            return torch.zeros(points_xy.shape[:-1], device=self.device)
-        if self.cfg.terrain.mesh_type == "none":
-            raise NameError("Can't measure height with terrain mesh type 'none'")
-
-        points = points_xy + self.terrain.cfg.border_size
-        points = (points / self.terrain.cfg.horizontal_scale).long()
-        px = torch.clip(points[..., 0], 0, self.height_samples.shape[0] - 2)
-        py = torch.clip(points[..., 1], 0, self.height_samples.shape[1] - 2)
-
-        # Taking the maximum makes a stair edge visible before the foot reaches
-        # the riser instead of averaging it away.
-        heights = torch.maximum(
-            self.height_samples[px, py], self.height_samples[px + 1, py]
-        )
-        heights = torch.maximum(heights, self.height_samples[px, py + 1])
-        return heights * self.terrain.cfg.vertical_scale
-
-    def _get_adaptive_clearance_peaks(self):
-        """Compute each foot's peak clearance from terrain sampled ahead."""
-        current_ground = self._sample_terrain_heights_xy(
-            self.foot_positions[:, :, :2]
-        )
-        forward = quat_apply_yaw(self.base_quat, self.forward_vec)[:, :2]
-        forward = forward / torch.norm(forward, dim=1, keepdim=True).clamp(min=1e-6)
-        distances = torch.as_tensor(
-            self.cfg.rewards.feet_height_lookahead,
-            device=self.device,
-            dtype=self.foot_positions.dtype,
-        )
-        sample_points = (
-            self.foot_positions[:, :, None, :2]
-            + forward[:, None, None, :] * distances[None, None, :, None]
-        )
-        upcoming_ground = self._sample_terrain_heights_xy(sample_points)
-        obstacle_height = torch.clamp(
-            torch.max(upcoming_ground, dim=-1).values - current_ground,
-            min=0.0,
-        )
-        adaptive_peak = torch.maximum(
-            torch.full_like(obstacle_height, self.cfg.rewards.feet_height_target_flat),
-            obstacle_height + self.cfg.rewards.feet_height_safety_margin,
-        )
-        return torch.clamp(
-            adaptive_peak, max=self.cfg.rewards.feet_height_target
-        )
-
     def _reward_swing_foot_forward(self):
-        swing_progress, in_swing = self._get_swing_progress()
-        swing_mask = (1.0 - self.desired_contact_states) * in_swing.float()
-        peak_height = self._get_adaptive_clearance_peaks()
-        phase_profile = torch.sin(torch.pi * swing_progress).clamp(min=0.0)
-        phase_profile = torch.pow(
-            phase_profile, self.cfg.rewards.feet_height_phase_power
-        )
-        target_height = peak_height * phase_profile
-        # Forward motion is rewarded only while the foot follows the requested
-        # clearance trajectory; lifting above it no longer earns extra reward.
-        height_gate = torch.exp(
-            -torch.square(self.foot_heights - target_height)
-            / self.cfg.rewards.feet_clearance_sigma
-        )
+        swing_mask = 1.0 - self.desired_contact_states
+        target_height = self.cfg.rewards.feet_height_target
+        height_gate = torch.clip(self.foot_heights / target_height, 0.0, 1.0)
         forward_vel = torch.clip(
             self.foot_relative_velocities[:, :, 0],
             0.0,
@@ -591,54 +474,3 @@ class BipedPF(BaseTask):
         landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
         reward = torch.sum(torch.square(landing_z_vels), dim=1)
         return reward
-
-    def _reward_foot_contact_force(self):
-        """Penalize sustained vertical foot loads above a body-weight ratio."""
-        vertical_force = torch.clamp(
-            self.contact_forces[:, self.feet_indices, 2], min=0.0
-        )
-        body_weight = (
-            self.cfg.rewards.nominal_robot_mass
-            * self.cfg.rewards.gravity_magnitude
-        )
-        force_ratio = vertical_force / body_weight
-        overload = torch.clamp(
-            force_ratio - self.cfg.rewards.contact_force_soft_limit_ratio,
-            min=0.0,
-        )
-        return torch.sum(torch.square(overload), dim=1)
-
-    def _reward_foot_touchdown_impulse(self):
-        """Penalize normalized contact impulse only on a new touchdown."""
-        vertical_force = torch.clamp(
-            self.contact_forces[:, self.feet_indices, 2], min=0.0
-        )
-        contacts = vertical_force > 0.1
-        touchdown = contacts & (~self.last_contacts)
-        body_weight = (
-            self.cfg.rewards.nominal_robot_mass
-            * self.cfg.rewards.gravity_magnitude
-        )
-        normalized_impulse = (
-            vertical_force * self.dt
-            / (
-                body_weight
-                * self.cfg.rewards.touchdown_impulse_window_s
-                + 1e-6
-            )
-        )
-        excess_impulse = torch.clamp(
-            normalized_impulse
-            - self.cfg.rewards.touchdown_impulse_soft_limit_ratio,
-            min=0.0,
-        )
-        return torch.sum(
-            touchdown.float() * torch.square(excess_impulse), dim=1
-        )
-
-    def compute_reward(self):
-        """Compute rewards, then preserve contacts for next-step touchdown detection."""
-        super().compute_reward()
-        self.last_contacts[:] = (
-            self.contact_forces[:, self.feet_indices, 2] > 0.1
-        )

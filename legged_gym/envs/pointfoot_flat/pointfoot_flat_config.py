@@ -36,7 +36,9 @@ robot_type = os.getenv("ROBOT_TYPE")
 class BipedCfgPF(BaseConfig):
     class env:
         num_envs = 8192
-        num_observations = 30
+        # 30 proprioceptive/gait observations + lateral path error
+        # + sin/cos of heading error + adaptive clearance target for each foot.
+        num_observations = 35
         num_critic_observations = 3 + num_observations
         num_height_samples = 117
         num_actions = 6
@@ -48,14 +50,14 @@ class BipedCfgPF(BaseConfig):
         fail_to_terminal_time_s = 0.5
 
     class terrain:
-        mesh_type = "plane"  # "heightfield" # none, plane, heightfield or trimesh
-        horizontal_scale = 0.1  # [m]
+        mesh_type = "trimesh"  # none, plane, heightfield or trimesh
+        horizontal_scale = 0.052  # [m], 0.26m stair tread = 5 cells
         vertical_scale = 0.005  # [m]
-        border_size = 25  # [m]
+        border_size = 5  # [m]
         curriculum = True
-        static_friction = 0.4
-        dynamic_friction = 0.4
-        restitution = 0.8
+        static_friction = 0.6
+        dynamic_friction = 0.6
+        restitution = 0.0
         # rough terrain only:
         measure_heights = False
         critic_measure_heights = True
@@ -77,38 +79,46 @@ class BipedCfgPF(BaseConfig):
         measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4]
         selected = False  # select a unique terrain type and pass all arguments
         terrain_kwargs = None  # Dict of arguments for selected terrain
-        max_init_terrain_level = 5 + 4  # starting curriculum state
+        max_init_terrain_level = 2  # start on easier stairs; curriculum raises difficulty
         terrain_length = 8.0
         terrain_width = 8.0
         num_rows = 10  # number of terrain rows (levels)
         num_cols = 20  # number of terrain cols (types)
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
+        stair_up_only = True
+        # None keeps the terrain curriculum active: about 5 cm initially,
+        # increasing with terrain difficulty and capped at 16 cm below.
+        stair_step_height = None
+        stair_step_width = 0.26  # [m]
+        stair_approach_size = 1.2  # [m]
+        stair_step_width_scales = [1.0]
+        max_stair_step_height = 0.16  # [m]
         # trimesh only:
         slope_treshold = (
             0.75  # slopes above this threshold will be corrected to vertical surfaces
         )
 
     class commands:
-        curriculum = True
+        curriculum = False
         smooth_max_lin_vel_x = 2.0
-        smooth_max_lin_vel_y = 1.0
+        smooth_max_lin_vel_y = 0.0
         non_smooth_max_lin_vel_x = 1.0
-        non_smooth_max_lin_vel_y = 1.0
-        max_ang_vel_yaw = 3.0
+        non_smooth_max_lin_vel_y = 0.0
+        max_ang_vel_yaw = 0.0
         curriculum_threshold = 0.75
         num_commands = 3  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.0  # time before command are changed[s]
-        heading_command = True  # if true: compute ang vel command from heading error, only work on adaptive group
+        heading_command = False  # keep yaw command fixed for stair-up-only training
         min_norm = 0.1
         zero_command_prob = 0.0
 
         class ranges:
-            lin_vel_x = [-1.0, 1.0]  # min max [m/s]
-            lin_vel_y = [-0.6, 0.6]  # min max [m/s]
+            lin_vel_x = [0.1, 0.5]  # conservative forward speed for stair learning
+            lin_vel_y = [0.0, 0.0]  # min max [m/s]
             # lin_vel_x = [-1.7, 1.7]  # min max [m/s]
             # lin_vel_y = [-1.7, 1.7]  # min max [m/s]
-            ang_vel_yaw = [-1, 1]  # min max [rad/s]
+            ang_vel_yaw = [0.0, 0.0]  # min max [rad/s]
             heading = [-3.14159, 3.14159]
 
     class gait:
@@ -122,7 +132,7 @@ class BipedCfgPF(BaseConfig):
             # frequencies = [2, 2]
             # offsets = [0.5, 0.5]
             durations = [0.5, 0.5]
-            swing_height = [0.0, 0.1]
+            swing_height = [0.16, 0.24]
 
     class init_state:
         pos = [0.0, 0.0, 0.8]  # x,y,z [m]
@@ -228,26 +238,37 @@ class BipedCfgPF(BaseConfig):
     class rewards:
         class scales:
             # termination related rewards
-            keep_balance = 1.0
+            keep_balance = 0.0
 
             # tracking related rewards
             tracking_lin_vel = 1
-            tracking_ang_vel = 0.5
+            tracking_ang_vel = 0.0
+            stair_progress = 2.0
+            swing_foot_clearance = 1.0
+            swing_foot_forward = 0.5
 
             # regulation related rewards
             base_height = -2
             lin_vel_z = -0.5
-            ang_vel_xy = -0.05
+            ang_vel_xy = -0.10
+            lateral_motion = -1.0
+            yaw_motion = -0.8
+            lateral_position = -2.0
+            heading_error = -3.0
+            base_ang_acc = -0.0002
             torques = -0.00008
             dof_acc = -2.5e-7
-            action_rate = -0.01
+            action_rate = -0.0125
             dof_pos_limits = -2.0
             collision = -1
-            action_smooth = -0.01
-            orientation = -10.0
+            action_smooth = -0.015
+            action_transition_smooth = -0.02
+            orientation = -12.0
             feet_distance = -100
             feet_regulation = -0.05
             foot_landing_vel = -0.15
+            foot_contact_force = -0.05
+            foot_touchdown_impulse = -0.10
             tracking_contacts_shaped_force = -2
             tracking_contacts_shaped_vel = -2
 
@@ -256,6 +277,7 @@ class BipedCfgPF(BaseConfig):
         clip_single_reward = 5
         tracking_sigma = 0.2  # tracking reward = exp(-error^2/sigma)
         ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        heading_error_deadband = 0.03  # ignore tiny heading errors to avoid yaw hunting [rad]
         height_tracking_sigma = 0.01
         soft_dof_pos_limit = (
             0.95  # percentage of urdf limits, values above this limit are penalized
@@ -263,10 +285,24 @@ class BipedCfgPF(BaseConfig):
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 0.8
         base_height_target = 0.68 # 0.58
-        feet_height_target = 0.10
+        # Adaptive swing-clearance target. On flat ground the foot only needs the
+        # minimum clearance; an upcoming step raises the peak by its height plus
+        # a safety margin, capped at the original 20 cm target.
+        feet_height_target = 0.20  # maximum adaptive clearance [m]
+        feet_height_target_flat = 0.08  # nominal flat-ground clearance [m]
+        feet_height_safety_margin = 0.04  # clearance above an upcoming step [m]
+        feet_height_lookahead = [0.08, 0.16, 0.24, 0.32]  # samples ahead of each foot [m]
+        feet_height_phase_power = 1.0  # exponent of the half-sine swing trajectory
+        feet_clearance_sigma = 0.01
+        swing_forward_vel_target = 0.5
         min_feet_distance = 0.115
         about_landing_threshold = 0.08
         max_contact_force = 100.0  # forces above this value are penalized
+        nominal_robot_mass = 20.0  # TRON1 nominal mass [kg]
+        gravity_magnitude = 9.81  # [m/s^2]
+        contact_force_soft_limit_ratio = 1.5  # continuous load limit in body weights
+        touchdown_impulse_window_s = 0.02  # normalization window [s]
+        touchdown_impulse_soft_limit_ratio = 1.0  # impulse limit relative to mg * window
         kappa_gait_probs = 0.05
         gait_force_sigma = 25.0
         gait_vel_sigma = 0.25

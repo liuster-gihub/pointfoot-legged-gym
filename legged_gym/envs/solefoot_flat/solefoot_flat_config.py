@@ -32,10 +32,10 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgSF(BaseConfig):
     class env:
-        num_envs = 8192
+        num_envs = 4096
         # num_privileged_group = 0 # 4096
         # num_proprio_group = num_envs - num_privileged_group
-        num_observations = 36  # note: only proprioceptive observations with last action, does not include command and gait
+        num_observations = 36 + 117  # proprioception plus terrain height samples
         num_critic_observations = 3 + num_observations # add lin_vel to the front
         num_height_samples = 117
         # num_privileged_obs = (
@@ -47,19 +47,19 @@ class BipedCfgSF(BaseConfig):
         episode_length_s = 20  # episode length in seconds
         obs_history_length = 5  # number of observations stacked together
         dof_vel_use_pos_diff = True
-        fail_to_terminal_time_s = 0.5
+        fail_to_terminal_time_s = 1.0
 
     class terrain:
-        mesh_type = "plane"  # "heightfield" # none, plane, heightfield or trimesh
-        horizontal_scale = 0.1  # [m]
+        mesh_type = "trimesh"  # none, plane, heightfield or trimesh
+        horizontal_scale = 0.052  # [m], 0.26m stair tread = 5 cells
         vertical_scale = 0.005  # [m]
-        border_size = 25  # [m]
+        border_size = 5  # [m]
         curriculum = True
-        static_friction = 0.4
-        dynamic_friction = 0.4
-        restitution = 0.8
+        static_friction = 0.6
+        dynamic_friction = 0.6
+        restitution = 0.0
         # rough terrain only:
-        measure_heights = False
+        measure_heights = True
         critic_measure_heights = True
         measured_points_x = [
             -0.6,
@@ -79,13 +79,19 @@ class BipedCfgSF(BaseConfig):
         measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4]
         selected = False  # select a unique terrain type and pass all arguments
         terrain_kwargs = None  # Dict of arguments for selected terrain
-        max_init_terrain_level = 5 + 4  # starting curriculum state
+        max_init_terrain_level = 0  # start from the easiest stair curriculum row
         terrain_length = 8.0
         terrain_width = 8.0
         num_rows = 10  # number of terrain rows (levels)
         num_cols = 20  # number of terrain cols (types)
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
+        stair_up_only = True
+        stair_step_height = 0.16  # [m]
+        stair_step_width = 0.26  # [m]
+        stair_step_height_range = [0.00, 0.16]  # [m]
+        stair_step_width_range = [0.45, 0.26]  # [m]
+        stair_approach_size = 1.2  # [m]
         # trimesh only:
         slope_treshold = (
             0.75  # slopes above this threshold will be corrected to vertical surfaces
@@ -99,26 +105,26 @@ class BipedCfgSF(BaseConfig):
     class commands:
         curriculum = False
         smooth_max_lin_vel_x = 2.0
-        smooth_max_lin_vel_y = 1.0
+        smooth_max_lin_vel_y = 0.0
         non_smooth_max_lin_vel_x = 1.0
-        non_smooth_max_lin_vel_y = 1.0
-        max_ang_vel_yaw = 3.0
+        non_smooth_max_lin_vel_y = 0.0
+        max_ang_vel_yaw = 0.0
         curriculum_threshold = 0.75
         num_commands = 3 + 2  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.0  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error, only work on adaptive group
         min_norm = 0.1
-        zero_command_prob = 0.8
+        zero_command_prob = 0.0
 
         class ranges:
-            lin_vel_x = [-1.0, 1.5]  # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]  # min max [m/s]
+            lin_vel_x = [0.1, 0.4]  # min max [m/s]
+            lin_vel_y = [0.0, 0.0]  # min max [m/s]
             # lin_vel_x = [-1.7, 1.7]  # min max [m/s]
             # lin_vel_y = [-1.7, 1.7]  # min max [m/s]
-            ang_vel_yaw = [-1, 1]  # min max [rad/s]
+            ang_vel_yaw = [0.0, 0.0]  # min max [rad/s]
             heading = [-3.14159, 3.14159]
-            base_height = [0.68, 0.78] # [0.40, 0.56] # TODO: lower than previous height
-            stand_still = [0, 1]
+            base_height = [0.75, 0.75]
+            stand_still = [0, 0]
 
     class gait:
         num_gait_params = 4
@@ -132,7 +138,7 @@ class BipedCfgSF(BaseConfig):
             # frequencies = [2, 2]
             # offsets = [0.5, 0.5]
             durations = [0.5, 0.5]
-            swing_height = [0.10, 0.20] # [0.0, 0.1]
+            swing_height = [0.18, 0.24]
 
     class init_state:
         pos = [0.0, 0.0, 0.8]  # x,y,z [m]
@@ -141,14 +147,14 @@ class BipedCfgSF(BaseConfig):
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
         default_joint_angles = {  # target angles when action = 0.0
             "abad_L_Joint": 0.0,
-            "hip_L_Joint": 0.0,
-            "knee_L_Joint": 0.0,
+            "hip_L_Joint": 0.58,
+            "knee_L_Joint": 1.35,
             "abad_R_Joint": 0.0,
-            "hip_R_Joint": 0.0,
-            "knee_R_Joint": 0.0,
+            "hip_R_Joint": -0.58,
+            "knee_R_Joint": -1.35,
 
-            "ankle_L_Joint": 0.0,
-            "ankle_R_Joint": 0.0
+            "ankle_L_Joint": -0.8,
+            "ankle_R_Joint": -0.8
         }
 
         init_stand_joint_angles = {
@@ -210,7 +216,7 @@ class BipedCfgSF(BaseConfig):
         collapse_fixed_joints = True  # merge bodies connected by fixed joints. Specific fixed joints can be kept by adding " <... dont_collapse="true">
         fix_base_link = False  # fixe the base of the robot
         default_dof_drive_mode = 3  # see GymDofDriveModeFlags (0 is none, 1 is pos tgt, 2 is vel tgt, 3 effort)
-        self_collisions = 0  # 1 to disable, 0 to enable...bitwise filter
+        self_collisions = 1  # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = True  # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = (
             False  # Some .obj meshes must be flipped from y-up to z-up
@@ -225,32 +231,32 @@ class BipedCfgSF(BaseConfig):
         thickness = 0.01
 
     class domain_rand:
-        randomize_friction = True
-        friction_range = [0.0, 1.6]
-        randomize_restitution = True
-        restitution_range = [0.0, 1.0]
-        randomize_base_mass = True
+        randomize_friction = False
+        friction_range = [0.6, 0.6]
+        randomize_restitution = False
+        restitution_range = [0.0, 0.0]
+        randomize_base_mass = False
         added_mass_range = [-0.5, 5]
-        randomize_base_com = True
+        randomize_base_com = False
         rand_com_vec = [0.03, 0.02, 0.03]
-        randomize_inertia = True
+        randomize_inertia = False
         randomize_inertia_range = [0.8, 1.2]
-        push_robots = True
+        push_robots = False
         push_interval_s = 7
         max_push_vel_xy = 1.0
         rand_force = False
         force_resampling_time_s = 15
         max_force = 50.0
         rand_force_curriculum_level = 0
-        randomize_Kp = True
+        randomize_Kp = False
         randomize_Kp_range = [0.8, 1.2]
-        randomize_Kd = True
+        randomize_Kd = False
         randomize_Kd_range = [0.8, 1.2]
-        randomize_motor_torque = True
+        randomize_motor_torque = False
         randomize_motor_torque_range = [0.8, 1.2]
-        randomize_default_dof_pos = True
+        randomize_default_dof_pos = False
         randomize_default_dof_pos_range = [-0.05, 0.05]
-        randomize_action_delay = True
+        randomize_action_delay = False
         randomize_imu_offset = False
         delay_ms_range = [0, 20]
 
@@ -258,35 +264,40 @@ class BipedCfgSF(BaseConfig):
         class scales:
             keep_balance = 1.0
 
-            tracking_lin_vel_x = 1.5
-            tracking_lin_vel_y = 1.5
-            tracking_ang_vel = 1
+            tracking_lin_vel_x = 2.0
+            tracking_lin_vel_y = 0.0
+            tracking_ang_vel = 0.0
+            stair_progress = 8.0
+            swing_foot_clearance = 3.0
+            swing_foot_forward = 2.0
 
             # regulation related rewards
-            base_height = -10
-            lin_vel_z = -0.5
-            ang_vel_xy = -0.05
-            torques = -0.00008
-            dof_acc = -2.5e-7
-            action_rate = -0.01
-            dof_pos_limits = -2.0
-            collision = -100 # -1
-            action_smooth = -0.01
-            orientation = -5.0
-            feet_distance = -100
-            feet_regulation = -0.05
-            tracking_contacts_shaped_force = -2.0
-            tracking_contacts_shaped_vel = -2.0
-            tracking_contacts_shaped_height = -2.0
+            base_height = -2
+            lin_vel_z = -0.1
+            ang_vel_xy = -0.02
+            lateral_motion = -0.2
+            yaw_motion = -0.1
+            torques = -0.00002
+            dof_acc = -5.0e-8
+            action_rate = -0.002
+            dof_pos_limits = -0.5
+            collision = -2
+            action_smooth = -0.002
+            orientation = -1.0
+            feet_distance = -5
+            feet_regulation = 0.0
+            tracking_contacts_shaped_force = -0.2
+            tracking_contacts_shaped_vel = -0.2
+            tracking_contacts_shaped_height = -0.2
             feet_contact_forces = -0.002
-            ankle_torque_limits = -0.1
-            power = -2e-4
-            relative_feet_height_tracking = 1.0
-            zero_command_nominal_state = -10.0
+            ankle_torque_limits = -0.02
+            power = -5e-5
+            relative_feet_height_tracking = 0.0
+            zero_command_nominal_state = 0.0
             keep_ankle_pitch_zero_in_air = 1.0
-            foot_landing_vel = -10.0
+            foot_landing_vel = -0.2
 
-        only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
+        only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
         clip_single_reward = 5
         tracking_sigma = 0.2  # tracking reward = exp(-error^2/sigma)
@@ -298,7 +309,9 @@ class BipedCfgSF(BaseConfig):
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 0.8
         base_height_target = 0.75 # 0.56 # lower than previous height
-        feet_height_target = 0.10
+        feet_height_target = 0.20
+        feet_clearance_sigma = 0.01
+        swing_forward_vel_target = 0.5
         min_feet_distance = 0.20
         max_contact_force = 100.0  # forces above this value are penalized
         kappa_gait_probs = 0.05
@@ -333,7 +346,7 @@ class BipedCfgSF(BaseConfig):
             lin_vel = 0.1
             ang_vel = 0.2
             gravity = 0.05
-            height_measurements = 0.1
+            height_measurements = 0.02
 
     # viewer camera:
     class viewer:
@@ -379,7 +392,7 @@ class BipedCfgPPOSF(BaseConfig):
         encoder_des = "Base linear velocity"
 
     class policy:
-        init_noise_std = 1.0
+        init_noise_std = 0.4
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = "elu"  # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
@@ -391,11 +404,11 @@ class BipedCfgPPOSF(BaseConfig):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.01
+        entropy_coef = 0.0
         num_learning_epochs = 5
         num_mini_batches = 4  # mini batch size = num_envs*nsteps / nminibatches
-        learning_rate = 1.0e-3  # 5.e-4
-        schedule = "adaptive"  # could be adaptive, fixed
+        learning_rate = 3.0e-4
+        schedule = "fixed"  # could be adaptive, fixed
         gamma = 0.99
         lam = 0.95
         desired_kl = 0.01

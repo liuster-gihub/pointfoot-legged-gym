@@ -34,6 +34,9 @@ from scipy import interpolate
 
 from isaacgym import terrain_utils
 
+if not hasattr(np, "float323232"):
+    np.float323232 = np.float32
+
 class Terrain:
     def __init__(self, cfg, num_robots) -> None:
         self.cfg = cfg
@@ -131,9 +134,14 @@ class Terrain:
         )
         slope = difficulty * 0.5
         random_height = 0.05 + difficulty * 0.15
-        default_step_width = 0.37  # 28cm
-        max_step_height = 0.3
-        step_height = 0.05 + difficulty * 0.23
+        default_step_width = getattr(self.cfg, "stair_step_width", 0.37)
+        max_step_height = getattr(self.cfg, "max_stair_step_height", 0.3)
+        target_step_height = getattr(self.cfg, "stair_step_height", None)
+        step_height = (
+            target_step_height
+            if target_step_height is not None
+            else 0.05 + difficulty * 0.23
+        )
         step_slope = step_height / default_step_width
         discrete_obstacles_height = 0.05 + difficulty * 0.25
         stepping_stones_size = 1.5 * (1.05 - difficulty)
@@ -165,20 +173,32 @@ class Terrain:
                 downsampled_scale=0.2,
             )
         elif choice < self.proportions[3]:
-            step_scale = np.array([1, 1.05, 0.95, 1.1, 0.9, 1.2, 0.8])
+            step_scale = np.array(
+                getattr(
+                    self.cfg,
+                    "stair_step_width_scales",
+                    [1, 1.05, 0.95, 1.1, 0.9, 1.2, 0.8],
+                )
+            )
             if choice < self.proportions[2]:
                 self.terrain_num[2] += 1
                 step_height *= -1
                 step_slope *= -1
                 step_width = (
                     default_step_width
-                    * step_scale[int((self.terrain_num[2] - 1) / self.cfg.num_rows)]
+                    * step_scale[
+                        int((self.terrain_num[2] - 1) / self.cfg.num_rows)
+                        % len(step_scale)
+                    ]
                 )
             else:
                 self.terrain_num[3] += 1
                 step_width = (
                     default_step_width
-                    * step_scale[int((self.terrain_num[3] - 1) / self.cfg.num_rows)]
+                    * step_scale[
+                        int((self.terrain_num[3] - 1) / self.cfg.num_rows)
+                        % len(step_scale)
+                    ]
                 )
             terrain_utils.pyramid_stairs_terrain(
                 terrain,

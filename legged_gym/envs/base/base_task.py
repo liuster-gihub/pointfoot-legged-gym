@@ -749,8 +749,8 @@ class BaseTask:
         hf_params.column_scale = self.terrain.cfg.horizontal_scale
         hf_params.row_scale = self.terrain.cfg.horizontal_scale
         hf_params.vertical_scale = self.terrain.cfg.vertical_scale
-        hf_params.nbRows = self.terrain.tot_cols
-        hf_params.nbColumns = self.terrain.tot_rows
+        hf_params.nbRows = self.terrain.tot_rows
+        hf_params.nbColumns = self.terrain.tot_cols
         hf_params.transform.p.x = -self.terrain.cfg.border_size
         hf_params.transform.p.y = -self.terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
@@ -758,7 +758,9 @@ class BaseTask:
         hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         hf_params.restitution = self.cfg.terrain.restitution
 
-        self.gym.add_heightfield(self.sim, self.terrain.heightsamples, hf_params)
+        self.gym.add_heightfield(
+            self.sim, self.terrain.heightsamples.flatten(order="C"), hf_params
+        )
         self.height_samples = (
             torch.tensor(self.terrain.heightsamples)
             .view(self.terrain.tot_rows, self.terrain.tot_cols)
@@ -1183,10 +1185,8 @@ class BaseTask:
         self.actions = target_pos / self.cfg.control.action_scale
         
     def compute_dof_vel(self):
-        diff = (
-            torch.remainder(self.dof_pos - self.last_dof_pos + self.pi, 2 * self.pi)
-            - self.pi
-        )
+        pos_diff = self.dof_pos - self.last_dof_pos
+        diff = torch.atan2(torch.sin(pos_diff), torch.cos(pos_diff))
         self.dof_pos_dot = diff / self.sim_params.dt
 
         if self.cfg.env.dof_vel_use_pos_diff:

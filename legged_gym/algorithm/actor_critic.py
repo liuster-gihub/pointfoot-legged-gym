@@ -115,7 +115,7 @@ class ActorCritic(nn.Module):
 
         # Action noise
         # self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        self.logstd = nn.Parameter(torch.zeros(num_actions))
+        self.logstd = nn.Parameter(torch.log(torch.ones(num_actions) * init_noise_std))
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
@@ -154,7 +154,8 @@ class ActorCritic(nn.Module):
 
     def update_distribution(self, observations):
         mean = self.actor(observations)
-        self.distribution = Normal(mean, mean * 0.0 + torch.exp(self.logstd))
+        std = torch.exp(torch.clamp(self.logstd, min=-3.0, max=0.5))
+        self.distribution = Normal(mean, mean * 0.0 + std)
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
